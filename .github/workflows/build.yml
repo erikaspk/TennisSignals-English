@@ -1,0 +1,85 @@
+name: Build Tennis Signals
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: owner
+            gradle: '8.9'
+          - variant: viewer
+            gradle: '8.13'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find project
+        shell: bash
+        run: |
+          if [[ -f TennisSignals-English.zip ]]; then
+            unzip -q TennisSignals-English.zip -d "$RUNNER_TEMP"
+            project="$RUNNER_TEMP/TennisSignals-English"
+          else
+            project="$GITHUB_WORKSPACE"
+          fi
+          test -f "$project/owner/settings.gradle"
+          test -f "$project/viewer/settings.gradle"
+          echo "PROJECT_DIR=$project" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-35 platforms;android-36 build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ matrix.gradle }}
+
+      - name: Restore owner signing key if configured
+        if: matrix.variant == 'owner'
+        env:
+          OWNER_KEY: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -n "$OWNER_KEY" ]]; then
+            umask 077
+            mkdir -p "$HOME/.android"
+            printf '%s' "$OWNER_KEY" | base64 --decode > "$HOME/.android/debug.keystore"
+          fi
+
+      - name: Build owner v35
+        if: matrix.variant == 'owner'
+        run: |
+          gradle --no-daemon -p "$PROJECT_DIR/owner" :app:assembleDebug
+          mkdir -p dist
+          cp "$PROJECT_DIR/owner/app/build/outputs/apk/debug/app-debug.apk" dist/TenisoSignalai-owner-v35.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs dist/TenisoSignalai-owner-v35.apk
+
+      - name: Build English APK and Play review bundle
+        if: matrix.variant == 'viewer'
+        env:
+          RELAY_URL: ${{ vars.RELAY_URL }}
+        run: |
+          gradle --no-daemon -p "$PROJECT_DIR/viewer" "-PrelayUrl=$RELAY_URL" :app:assembleDirectDebug :app:bundlePlayRelease
+          mkdir -p dist
+          cp "$PROJECT_DIR/viewer/app/build/outputs/apk/direct/debug/app-direct-debug.apk" dist/TennisSignals-English-direct.apk
+          cp "$PROJECT_DIR/viewer/app/build/outputs/bundle/playRelease/app-play-release.aab" dist/TennisSignals-English-play-unsigned.aab
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs dist/TennisSignals-English-direct.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TennisSignals-${{ matrix.variant }}
+          path: dist/*
+          if-no-files-found: error
