@@ -19,7 +19,6 @@ jobs:
           cd "$RUNNER_TEMP/buyer-demo/TennisSignals-English/relay"
           export RELAY_DB="$RUNNER_TEMP/buyer-demo.sqlite3"
           export RELAY_OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-
           python3 - <<'PY'
           import os
           import time
@@ -29,4 +28,50 @@ jobs:
           now = int(time.time())
           rows = [
               {
-                  "id": f"
+                  "id": f"demo-{i}", "date": date.today().isoformat(),
+                  "tier": "green" if i % 2 else "yellow",
+                  "title": f"DEMO · Match {i}", "time": (now - i) * 1000,
+                  "outcome": "Vyksta" if i <= 4 else "Laimėta",
+                  "profit": 6 if i == 5 else 0,
+                  "bet": {"unit": "ml", "odds": 1.60, "stake": 10},
+              }
+              for i in range(1, 6)
+          ]
+          with db(os.environ["RELAY_DB"]) as connection:
+              connection.execute("INSERT OR REPLACE INTO feed VALUES (1, ?, ?)",
+                                 (encode(normalize({"schema": 1, "signals": rows})).decode(), now))
+          PY
+          python3 relay.py member --days 7 > "$RUNNER_TEMP/demo-code"
+          python3 relay.py serve > "$RUNNER_TEMP/relay.log" 2>&1 &
+
+      - name: Open HTTPS tunnel and show demo details
+        run: |
+          curl -fsSL --retry 2 --max-time 90 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8080 > "$RUNNER_TEMP/tunnel.log" 2>&1 &
+          url=""
+          for attempt in {1..30}; do
+            url="$(grep -m1 -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/tunnel.log" || true)"
+            if [ -n "$url" ] && curl -fsS --max-time 3 "$url/health" >/dev/null 2>&1; then
+              printf '\nHTTPS feed address: %s\nDemo member code: %s\n\n' "$url" "$(cat "$RUNNER_TEMP/demo-code")"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/relay.log" "$RUNNER_TEMP/tunnel.log"
+          echo "::error::The HTTPS demo tunnel did not start."
+          exit 1
+
+      - name: Keep demo online for 30 minutes
+        run: |
+          export RELAY_DB="$RUNNER_TEMP/buyer-demo.sqlite3"
+          python3 - <<'PY'
+          import os
+          import sqlite3
+          import time
+
+          for _ in range(30):
+              with sqlite3.connect(os.environ["RELAY_DB"]) as connection:
+                  connection.execute("UPDATE feed SET updated=? WHERE id=1", (int(time.time()),))
+              time.sleep(60)
+          PY
